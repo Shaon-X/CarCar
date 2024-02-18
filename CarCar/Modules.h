@@ -15,3 +15,7 @@ uint8_t TCSEnable();
 uint8_t TCSDisable();
 uint8_t TCSSleep();
 uint8_t TCSRead(uint16_t* data);
+uint8_t TCSRed(uint16_t *data);
+uint8_t MPUInit();
+void MPURead(float* data);
+void motor(int8_t motorL, int8_t motorR);

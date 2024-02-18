@@ -1,4 +1,5 @@
 
+//TWI status register values
 #define Start		0x08
 #define RStart		0x10
 #define AddW		0x18
@@ -7,48 +8,40 @@
 #define DatR		0x50
 #define DatRN		0x58
 
-uint16_t sysTick;			//system tick
+uint32_t sysTick;			//system tick
 
 /*
 Function:	systemTimeInit
 Remark:		only called at the start
 */
 void systemTimeInit(){
-	/*	prescaler	= 64
-		clk freq	= 1MHz / 64	=15625
-		period		= 64microsec
-		max time	= 4.194304sec
+	/*	prescaler	= 32
+		clk freq	= 1MHz / 8	= 31250
+		period		= 32 microsec
+		interrupt	= 0.008192 sec
 	*/
 
 	sysTick = 0;			//initialize system tick
-	TCNT1 = 0;				//initialize timer1 count
-	TIFR = 0b00000100;		//clear TOV1 bit
-	TIMSK |= 0b00000100;	//enable enable timer1 overflow interrupt
+	TCNT2 = 0;				//initialize timer2 count
+	TIFR = 0b01000000;		//clear TOV2 bit
+	TIMSK |= 0b01000000;	//enable enable timer2 overflow interrupt
 	sei();					//enable global interrupt in status register
 	
-	TCCR1A = 0b00000000;	//normal mode
-	TCCR1B = 0b00000011;	//prescaller 64
-}
-
-/*
-Timer1 Interrupt Vector
-*/
-ISR(TIMER1_OVF_vect){
-	sysTick++;				//increase system tick
+	TCCR2 = 0b00000011;		//normal mode, prescaller 32
 }
 
 /*
 Function:	tick
 */
 uint32_t tick(){
-	return (uint32_t)sysTick * (uint32_t)65536 + (uint32_t)TCNT1;	//return number of ticks
+	return sysTick * (uint32_t)256 + (uint32_t)TCNT2;	//return number of ticks
 }
 
 /*
 Function:	time
 */
 float time(){
-	return (float)((uint32_t)sysTick * (uint32_t)65536 + (uint32_t)TCNT1)*0.000064;	//return elapsed time
+	return (float)tick()*0.000032;	//return elapsed time
 }
 
 /*
@@ -102,41 +95,82 @@ void gpioToggle(uint8_t port, uint8_t pin){
 	
 }
 
+uint8_t gpioReadDebounce(uint8_t PB){
+	static float PBtime[2] = {-1, -1};
+	static uint8_t PBstate[2];
+	uint8_t buff;
+	
+	if(PB)
+		buff = gpioRead(BT2);
+	else
+		buff = gpioRead(BT1);
+		
+	if(!buff){
+		
+		PBtime[PB] = time();
+		if(!PBstate[PB]){
+			PBstate[PB] = 1;
+			return 1;	
+		}else{
+			return 0;
+		}
+		
+	}else{
+		
+		if(time() - PBtime[PB] > 0.05)
+			PBstate[PB] = 0;
+		return 0;
+		
+	}
+	
+}
+
 /*
 Function:	delay
 Arguments:	time		delay in seconds
 Remarks:	CKSEL3:0 should be set to 0001 for 1MHz Internal RC Oscillator
 */
 void delay(float timeDelay){
-	float timeBuff = time();
 	
-	while(time() - timeBuff < timeDelay);
+	float timeBuff = time();						//initialize starting time
+	while(time() - timeBuff < timeDelay);			//wait for specified time
 	
 }
 
 /*
 Function:	pwmInit
-Arguments:	dutyCycle		0 - 100 
 */
-void pwmInit(uint8_t dutyCycle){ 
+void pwmInit(){ 
 	
-	gpioInit(0x16, 3, 1, 0);				//set PB3 as output
-	TCNT0 = 0;								//set initial counter
-	OCR0 = (float)dutyCycle * 255.0 /100.0;	//set output compare register value
-	TCCR0 = 0b01101001;						//WGM01:00 = 11(fast PWM mode), COM001:00 = 10(non-inverting), CS02:00 = 001(no prescaler)
 	
+	gpioInit(0x10, 4, 1, 0);					//set PD4 as output
+	gpioInit(0x10, 5, 1, 0);					//set PD5 as output
+	
+	
+	TCNT1 = 0;
+	OCR1A = 0;
+	OCR1B = 0;
+	TCCR1A = 0b10100011;						//fast PWM, non-inverting
+	
+	TCCR1B = 0b00001010;						//prescaler 8
+	
+		
 }
 
 /*
 Function:	pwmSet
 Arguments:	dutyCycle		0 - 100
 */
-void pwmSet(uint8_t dutyCycle){
+void pwmSet(uint8_t dutyCycle1, uint8_t dutyCycle2){
 	
-	OCR0 = (float)dutyCycle * 255.0 /100.0;	//set output compare register value
 	
-}
+	OCR1A = (float)dutyCycle1 /100.0 * 1023.0 ;	//set output compare register value
+	OCR1B = (float)dutyCycle2 /100.0 * 1023.0 ;	//set output compare register value
+	
+	
+	
 
+}
 /*
 Function:	twiInit
 Remarks:	SCL freq	CLK / [16+2(TWBR)(4^prescaler in TWSR)] = 41.667kHz
@@ -145,8 +179,8 @@ Remarks:	SCL freq	CLK / [16+2(TWBR)(4^prescaler in TWSR)] = 41.667kHz
 void twiInit(){
 	
 	PORTC |= 0b00000011;	//enable pullup resistors
-	TWBR = 1;
-	TWSR = 0b00000000;
+	TWBR = 1;				//set TWBR for SCL frequency = 41.667kHz
+	TWSR = 0b00000000;		//prescaler = 1
 	
 }
 
@@ -159,6 +193,7 @@ Return:		1(error during TWI) or 0(no error)
 */
 uint8_t twiRead(uint8_t add, uint8_t byte, uint8_t* data){
 	uint8_t err = 0;
+	
 	TWCR = 0b11100100;					//send start
 	while(!(TWCR&0b10000000));			//wait for start to send
 	if((TWSR&0b11111000)!=Start)		//check status if start not sent
@@ -203,6 +238,7 @@ Return:		1(error during TWI) or 0(no error)
 */
 uint8_t twiWrite(uint8_t add, uint8_t byte, uint8_t* data){
 	uint8_t err = 0;
+	
 	TWCR = 0b11100100;					//send start
 	while(!(TWCR&0b10000000));			//wait for start to send
 	if((TWSR&0b11111000)!=Start)		//check status if start not sent
@@ -233,15 +269,15 @@ uint8_t twiWrite(uint8_t add, uint8_t byte, uint8_t* data){
 /*
 Function:	twiCombine
 Arguments:	add			slave address (without shifting 1 bit to the left)
-			byteW		number of bytes to write
 			dataW		byte to be written
 			byteR		number of bytes to be read
-			*data		pointer to data storage location, in uint8_t
+			*dataR		pointer to data storage location, in uint8_t
 Return:		1(error during TWI) or 0(no error)
 */
 uint8_t twiCombine(uint8_t add, uint8_t dataW, uint8_t byteR, uint8_t* dataR){
 	
 	uint8_t err = 0;
+	
 	TWCR = 0b11100100;					//send start
 	while(!(TWCR&0b10000000));			//wait for start to send
 	if((TWSR&0b11111000)!=Start)		//check status if start not sent
@@ -308,6 +344,7 @@ Return:		1(Slave is in address range) or 0(not in adress range)
 */
 uint8_t twiTest(uint8_t min, uint8_t max){
 	uint8_t val=0;
+	
 	while(min<=max){
 		TWCR = 0b11100100;					//send start bit
 		while(!(TWCR&0b10000000));			//wait for start to send
@@ -350,7 +387,7 @@ uint8_t uartTransmit(uint8_t* data, uint8_t byte, float wtime){
 	float timeBuff = time();
 	for(uint8_t i=0; i<byte; i++){
 		while(!(UCSRA & 0b00100000)){			//wait for UDR to be free
-			if(time() - timeBuff > wtime)
+			if(time() - timeBuff > wtime)		//if max wait time exceeded
 				return 1;
 		}	
 		UDR = *(data+i);						//send data
@@ -371,10 +408,10 @@ uint8_t uartReceive(uint8_t* data, uint8_t byte, float wtime){
 	float timeBuff = time();
 	for (uint8_t i=0; i<byte; i++){
 		while(!(UCSRA & 0b10000000)){		//check RXC flag
-			if(time() - timeBuff > wtime){
+			if(time() - timeBuff > wtime){	//if max wait time exceeded
 				uint8_t noUse;
 				while(UCSRA & 0b10000000)	//flush buffer
-				noUse = UDR;
+					noUse = UDR;
 				return 1;
 			}
 		}
